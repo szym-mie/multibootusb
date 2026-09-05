@@ -1,3 +1,4 @@
+#! /usr/bin/perl
 use strict;
 use warnings;
 use sigtrap qw(die normal-signals);
@@ -9,9 +10,12 @@ my $LSFILE = ".ls";
 my $BOOTDIR = "$DATAMNT/boot";
 my $ISOSDIR = "$BOOTDIR/isos";
 my $MBUSBDIR = "mbusb.d";
+my $MBUSBCFG = "mbusb.cfg";
 my $GRUBCFG = "grub.cfg";
 my $ZERODEV = "/dev/zero";
 my $CHECKFILE = ".checkpoint";
+my $SYSLINUXURL = "https://www.kernel.org/pub/linux/utils/boot/syslinux/";
+my $SYSLINUXVER = "syslinux-6.03";
 
 my $ftp;
 my $ftpuser;
@@ -55,6 +59,7 @@ sub normalize {
 	$dev =~ s/\/$//;
 	$ftp .= "/" if (length $ftp && $ftp !~ /\/$/);
 	print "DEV: $dev\nFTP: $ftp\n";
+	cp("grub.cfg.example","grub.cfg") unless (-f "grub.cfg");
 }
 
 parse_args();
@@ -117,8 +122,9 @@ sub mkfs {
 }
 
 sub cp {
-	my ($flags,$src,$dst) = @_;
-	$flags = "-$flags" if (length $flags);
+	my ($src,$dst,$flags) = @_;
+	$flags = "-$flags" if (defined $flags);
+	$flags = $flags || "";
 	print "Copy $src -> $dst... ";
 	`cp $flags $src $dst 2>&1`;
 	$? and die "failed with $?";
@@ -193,21 +199,31 @@ sub scan_urls {
 }
 
 sub curl {
-	my ($user,$baseurl,$basedir,@files,$wrout) = @_;
-	my $args = "";
-	$args .= "-u $user " if (length $user); 
-	$args .= "-w \"$wrout\" " if (length $wrout);
-	foreach my $f (@files) {
-		$args .= "-o $basedir$f $baseurl$f ";
+	my ($baseurl,$basedir,$files,$args) = @_;
+	$args = $args || "";
+	foreach my $f (@$files) {
+		$args .= " -o $basedir$f $baseurl$f";
 	}
 	`curl $args`;
 	$? and die "failed with $?";
 }
 
+sub tar {
+	my ($mode,$tar,$args) = @_;
+	$args = $args || "";
+	my $dowhat = "";
+	$dowhat = "Extracting" if $mode =~ /-x/;
+	$dowhat = "Creating" if $mode =~ /-c/;
+	print "$dowhat archive $tar... ";
+	`tar $mode $tar $args`;
+	$? and die "failed with $?";
+	print "OK\n";
+}
+
 sub lsftp {
 	my @urls = ("");
 	print "FTP list $ftp... ";
-	curl($ftpuser,$ftp,$LSFILE,@urls);
+	curl($ftp,$LSFILE,\@urls,"-u $ftpuser");
 	open(my $fp,"<",$LSFILE) or die "cannot open $LSFILE";
 	my @files;
 	readline($fp); # skip first line "total ..."
@@ -223,9 +239,9 @@ sub lsftp {
 }
 
 sub getftp {
-	my ($basedir,@files) = @_;
+	my ($basedir,$files) = @_;
 	print "FTP mget $ftp... ";
-	curl($ftpuser,$ftp,$basedir,@files);
+	curl($ftp,$basedir,$files,"-u $ftpuser");
 	print "OK\n";
 }
 
@@ -242,19 +258,19 @@ sub prompt {
 	while (1) {
 		print "$msg [$spec] ";
 		my $line = <STDIN>;
-		my isempty = defined($onempty) && $line eq "\n";
+		my $isempty = defined $onempty && $line eq "\n";
 		if ($spec =~ /^\d/i) {
-			return $empty if ($isempty);
+			return $onempty if ($isempty);
 			my ($input) = $line =~ /^(\d+)\n$/i;
-			if (defined($input)) {
+			if (defined $input) {
 				return int($input);
 			} else {
 				print "Not a number\n";
 			}
 		} elsif ($spec eq "y/n") {
-			return $empty if ($isempty);
+			return $onempty if ($isempty);
 			my ($input) = $line =~ /^([yn])\n$/i;
-			if (defined($input)) {
+			if (defined $input) {
 				return $input =~ /y/i;
 			} else {
 				print "Respond y/n\n";
@@ -271,7 +287,7 @@ my ($done_step,$done_info) = try_resume();
 $done_step = 0 if ($cleanflag);
 # Start
 print "ALL DATA ON $dev WILL BE ERASED!\n";
-exit 0 unless (prompt("Do you want to continue? ","y/n","n"));
+exit 0 unless (prompt("Do you want to continue?","y/n","n"));
 if ($done_step > 0) {
 	print "Found a checkpoint after $done_info.\n";
 	$done_step = 0 unless (prompt("Resume?","y/n","y"));
@@ -311,12 +327,25 @@ if (++$step > $done_step) {
 	checkpoint($step,"the GRUB bootloader was installed");
 }
 
+my $GRUBDIR = "$BOOTDIR/grub/";
 if (++$step > $done_step) {
 	# Setup the ISO directory
 	mkdir $ISOSDIR;
-	cp("R",$MBUSBDIR,"$BOOTDIR/grub/");
-	cp("",$GRUBCFG,"$BOOTDIR/grub/");
+	cp($MBUSBDIR,$GRUBDIR,"R");
+	cp($MBUSBCFG,$GRUBDIR);
+	cp($GRUBCFG,$GRUBDIR);
 	checkpoint($step,"the boot files were copied");
+}
+
+my $MEMDISK = "$SYSLINUXVER/bios/memdisk/memdisk";
+my $SYSLINUXTAR = "$SYSLINUXVER.tar.gz";
+if (++$step > $done_step) {
+	my @urls = ($SYSLINUXTAR);
+	print "Downloading $SYSLINUXTAR...\n";
+	curl($SYSLINUXURL,$GRUBDIR,\@urls,"-L");
+	tar("-C $GRUBDIR -xzf","$GRUBDIR$SYSLINUXTAR",
+		"--no-same-owner --strip-components 3 $MEMDISK");
+	checkpoint($step,"memdisk was installed");
 }
 
 # Scan for URLs in mbusb.d
@@ -326,7 +355,7 @@ foreach my $url (@urls) {
 	print ") $url\n";
 }
 
-if (length $ftp && prompt("Attempt to download the ISO files?","y/n")) {
+if (length $ftp && prompt("Attempt to download the ISO files?","y/n","y")) {
 	print "Searching for the ISO files...\n";
 	my @all = lsftp();
 	my @files;
@@ -364,7 +393,7 @@ if (length $ftp && prompt("Attempt to download the ISO files?","y/n")) {
 				$sel = $found[0];
 			}
 
-			next unless (defined($sel));
+			next unless (defined $sel);
 			my $n = $sel->[0];
 			print "Adding $n...";
 			my $mb = $sel->[1];
@@ -391,7 +420,7 @@ if (length $ftp && prompt("Attempt to download the ISO files?","y/n")) {
 		$askflag = 1;
 	}
 	print "Downloading...\n";
-	getftp("$ISOSDIR/",@files);
+	getftp("$ISOSDIR/",\@files);
 } else {
 	print "You can now install the ISO files manually.";
 }
