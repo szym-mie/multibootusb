@@ -1,5 +1,10 @@
 *.local
 *.log
+# Temporary listing
+.ls
+# Checkpoints
+.checkpoint
+# GRUB2-related
 grub.cfg
 /fonts
 /i386-pc
@@ -8,7 +13,3 @@ grub.cfg
 /x86_64-efi
 /grubenv
 /memdisk
-/docs/Gemfile.lock
-/docs/_site
-/docs/.sass-cache
-/docs/.jekyll-metadata
